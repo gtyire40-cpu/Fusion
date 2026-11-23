@@ -8,3 +8,15 @@ license = "Apache-2.0"
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
+fusion-master = { path = "../fusion-master" }
+fusion-worker = { path = "../fusion-worker" }
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "fusion"
+path = "src/main.rs"

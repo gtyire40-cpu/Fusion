@@ -40,15 +40,16 @@ Antes de escribir funcionalidad.
 **Objetivo:** que un Master y un Worker se encuentren, se autentiquen mutuamente y se hablen.
 
 **Tareas**
-- [ ] Definir en Protocol Buffers los primeros mensajes: `NODE_REGISTER`, `NODE_STATUS`.
-- [ ] Servidor gRPC en el Master (Tonic) y cliente en el Worker.
-- [ ] Autoridad de certificados local: el Master genera su CA y certificados para cada Worker.
-- [ ] mTLS: ambas partes verifican el certificado de la otra.
-- [ ] Emparejamiento manual: el Worker pide unirse, el Master muestra un código y el usuario aprueba o rechaza.
-- [ ] Persistir en el Master la lista de nodos emparejados (SQLite).
-- [ ] Heartbeat periódico para saber si un nodo sigue vivo.
-- [ ] CLI mínima: `fusion master start`, `fusion worker join <ip>`, `fusion nodes list`.
-- [ ] Pruebas de integración con dos procesos en la misma máquina y luego con dos equipos reales.
+- [x] Definir en Protocol Buffers los primeros mensajes: `NODE_REGISTER`, `NODE_STATUS`.
+- [x] Servidor gRPC en el Master (Tonic) y cliente en el Worker.
+- [x] Autoridad de certificados local: el Master genera su CA y certificados para cada Worker.
+- [x] mTLS: ambas partes verifican el certificado de la otra.
+- [x] Emparejamiento manual: el Worker pide unirse, el Master muestra un código y el usuario aprueba o rechaza.
+- [x] Persistir en el Master la lista de nodos emparejados (SQLite).
+- [x] Heartbeat periódico para saber si un nodo sigue vivo.
+- [x] CLI mínima: `fusion master start`, `fusion worker join <ip>`, `fusion nodes list`.
+- [x] Prueba de integración de emparejamiento, registro mTLS y heartbeat con dos procesos locales.
+- [ ] Validar la conexión y el corte de red con dos equipos reales.
 
 **Entregable:** dos programas que se emparejan y mantienen una conexión cifrada.
 

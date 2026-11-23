@@ -226,8 +226,33 @@ La estructura puede cambiar a medida que avance el diseño.
 
 ## 9. Estado del proyecto
 
-Fase 0 completada: repositorio, workspace de Cargo, herramientas de calidad e integración continua preparados.
-Las fases siguientes se describen en la hoja de ruta y pueden cambiar según los resultados de las mediciones (especialmente la Fase 4).
+Fase 0 completada. La implementación de software de la Fase 1 y su prueba local con dos procesos están listas; falta validar la conexión con dos equipos reales. Consulta [ROADMAP.md](ROADMAP.md) para el estado actualizado.
+
+### Ejecutar el prototipo de la Fase 1
+
+El Master debe anunciar una dirección IP alcanzable por los Workers. Su huella de CA se muestra al iniciar:
+
+```bash
+cargo run -p fusion-cli -- master start --advertise-host 192.168.1.10
+```
+
+En otro equipo, compara la huella indicada por el Master y solicita el emparejamiento:
+
+```bash
+cargo run -p fusion-cli -- worker join 192.168.1.10 --fingerprint <HUELLA_SHA256>
+```
+
+El Worker queda esperando aprobación. En otra terminal del Master:
+
+```bash
+cargo run -p fusion-cli -- master pending
+cargo run -p fusion-cli -- master approve <NODE_ID>
+cargo run -p fusion-cli -- nodes list
+```
+
+También se puede rechazar una solicitud con `fusion master reject <NODE_ID>`. El Worker permanece conectado y envía heartbeats hasta que se interrumpe con Ctrl+C. El prototipo usa los puertos TCP 50051 (emparejamiento), 50052 (mTLS) y 50053 (descarga de la CA); permite esos puertos solo en la red local. Se pueden cambiar con `--pairing-bind`, `--node-bind` y `--ca-bind` en el Master, y con `--pairing-port`, `--node-port` y `--ca-port` en el Worker.
+
+La descarga inicial de la CA se hace por HTTP porque todavía no hay una raíz de confianza en el Worker. La seguridad depende de comparar la huella recibida con la mostrada en la consola del Master por un canal independiente antes de continuar. El Master firma solo solicitudes de certificado aprobadas y valida la prueba de posesión de la clave privada del Worker. Los certificados de nodo duran un año y la CA diez; la renovación y revocación aún no están implementadas. Protege y respalda el directorio de datos del Master: contiene la clave privada de la CA. Este prototipo registra nodos; aún no envía ni ejecuta trabajos.
 
 ## 10. Contribuir
 

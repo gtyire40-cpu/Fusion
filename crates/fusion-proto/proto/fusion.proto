@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package fusion.v1;
+
+service PairingService {
+  rpc RequestPairing(PairingRequest) returns (PairingResponse);
+  rpc GetPairingStatus(PairingStatusRequest) returns (PairingStatusResponse);
+}
+
+service NodeService {
+  rpc Register(NodeRegister) returns (NodeStatus);
+  rpc Heartbeat(HeartbeatRequest) returns (NodeStatus);
+}
+
+message PairingRequest {
+  string request_id = 1;
+  string node_name = 2;
+  string certificate_signing_request_pem = 3;
+}
+
+message PairingResponse {
+  string request_id = 1;
+}
+
+message PairingStatusRequest {
+  string request_id = 1;
+}
+
+message PairingStatusResponse {
+  PairingState state = 1;
+  string certificate_pem = 2;
+  string message = 3;
+}
+
+enum PairingState {
+  PAIRING_STATE_UNSPECIFIED = 0;
+  PAIRING_STATE_PENDING = 1;
+  PAIRING_STATE_APPROVED = 2;
+  PAIRING_STATE_REJECTED = 3;
+}
+
+message NodeRegister {
+  string node_id = 1;
+  string node_name = 2;
+  string protocol_version = 3;
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+}
+
+message NodeStatus {
+  string node_id = 1;
+  string node_name = 2;
+  int64 last_seen_unix_ms = 3;
+  bool online = 4;
+}

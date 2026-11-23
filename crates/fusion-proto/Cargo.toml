@@ -8,3 +8,10 @@ license = "Apache-2.0"
 workspace = true
 
 [dependencies]
+prost.workspace = true
+tonic.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+protoc-bin-vendored.workspace = true
+prost-build.workspace = true

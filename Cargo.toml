@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/fusion-proto",
+    "crates/fusion-network",
+    "crates/fusion-discovery",
+    "crates/fusion-resources",
+    "crates/fusion-scheduler",
+    "crates/fusion-master",
+    "crates/fusion-worker",
+    "crates/fusion-cli",
+]
+default-members = [
+    "crates/fusion-proto",
+    "crates/fusion-network",
+    "crates/fusion-discovery",
+    "crates/fusion-resources",
+    "crates/fusion-scheduler",
+    "crates/fusion-master",
+    "crates/fusion-worker",
+    "crates/fusion-cli",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "warn"

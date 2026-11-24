@@ -36,6 +36,14 @@ enum NodesCommand {
         #[arg(long)]
         data_dir: Option<std::path::PathBuf>,
     },
+    /// Show hardware capabilities for a paired worker.
+    Show {
+        node_id: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -46,5 +54,13 @@ async fn main() -> Result<()> {
         Command::Nodes {
             command: NodesCommand::List { data_dir },
         } => fusion_master::list_nodes(&fusion_master::resolve_data_dir(data_dir)?),
+        Command::Nodes {
+            command:
+                NodesCommand::Show {
+                    node_id,
+                    json,
+                    data_dir,
+                },
+        } => fusion_master::show_node(&fusion_master::resolve_data_dir(data_dir)?, &node_id, json),
     }
 }

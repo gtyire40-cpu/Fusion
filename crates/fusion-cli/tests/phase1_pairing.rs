@@ -155,6 +155,37 @@ fn worker_requires_approval_then_registers_with_mtls() -> Result<(), Box<dyn std
     assert!(nodes.contains(&node_id));
     assert!(nodes.contains("online"));
 
+    let capabilities = Command::new(binary)
+        .args([
+            "nodes",
+            "show",
+            &node_id,
+            "--json",
+            "--data-dir",
+            data_dir.path().to_str().expect("UTF-8 temp path"),
+        ])
+        .output()?;
+    assert!(
+        capabilities.status.success(),
+        "could not read Worker capabilities: {}",
+        String::from_utf8_lossy(&capabilities.stderr)
+    );
+    let capabilities: serde_json::Value = serde_json::from_slice(&capabilities.stdout)?;
+    assert_eq!(capabilities["node_id"], node_id);
+    assert!(
+        capabilities["capabilities"]["cpu"]["logical_threads"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    assert!(
+        capabilities["capabilities"]["memory"]["total_bytes"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    assert!(capabilities["capabilities"]["network_interfaces"].is_array());
+
     worker.0.kill()?;
     worker.0.wait()?;
     std::thread::sleep(Duration::from_secs(16));

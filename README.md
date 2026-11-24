@@ -226,7 +226,7 @@ La estructura puede cambiar a medida que avance el diseño.
 
 ## 9. Estado del proyecto
 
-Fase 0 completada. La implementación de software de la Fase 1 y su prueba local con dos procesos están listas; falta validar la conexión con dos equipos reales. Consulta [ROADMAP.md](ROADMAP.md) para el estado actualizado.
+Fase 0 completada. La implementación de software de las Fases 1 y 2 y sus pruebas locales están listas. Falta validar la conexión y la detección en dos equipos reales. Consulta [ROADMAP.md](ROADMAP.md) para el estado actualizado.
 
 ### Ejecutar el prototipo de la Fase 1
 
@@ -253,6 +253,17 @@ cargo run -p fusion-cli -- nodes list
 También se puede rechazar una solicitud con `fusion master reject <NODE_ID>`. El Worker permanece conectado y envía heartbeats hasta que se interrumpe con Ctrl+C. El prototipo usa los puertos TCP 50051 (emparejamiento), 50052 (mTLS) y 50053 (descarga de la CA); permite esos puertos solo en la red local. Se pueden cambiar con `--pairing-bind`, `--node-bind` y `--ca-bind` en el Master, y con `--pairing-port`, `--node-port` y `--ca-port` en el Worker.
 
 La descarga inicial de la CA se hace por HTTP porque todavía no hay una raíz de confianza en el Worker. La seguridad depende de comparar la huella recibida con la mostrada en la consola del Master por un canal independiente antes de continuar. El Master firma solo solicitudes de certificado aprobadas y valida la prueba de posesión de la clave privada del Worker. Los certificados de nodo duran un año y la CA diez; la renovación y revocación aún no están implementadas. Protege y respalda el directorio de datos del Master: contiene la clave privada de la CA. Este prototipo registra nodos; aún no envía ni ejecuta trabajos.
+
+### Consultar hardware de un nodo
+
+Después de emparejar el Worker, sus capacidades se envían al registrarse y se actualizan cada 30 segundos:
+
+```bash
+cargo run -p fusion-cli -- nodes show <NODE_ID>
+cargo run -p fusion-cli -- nodes show <NODE_ID> --json
+```
+
+La detección lee CPU y memoria desde `/proc`, información de enlaces desde `/sys` e interfaces/IP desde el sistema. Temperatura, frecuencia, carga y velocidad del enlace se muestran como no disponibles cuando el equipo o sus permisos no las exponen. La latencia al Master se estima con el tiempo de respuesta del heartbeat. Los valores corresponden al Worker; Fusion no suma memoria entre máquinas.
 
 ## 10. Contribuir
 

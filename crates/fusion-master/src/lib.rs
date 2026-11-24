@@ -7,6 +7,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
+use fusion_discovery::{
+    ConnectionType, CpuCapabilities, HardwareSnapshot, MemoryCapabilities, NetworkInterface,
+};
 use fusion_network::{
     ca_fingerprint, default_data_dir, master_identity, sign_worker_csr, tonic_ca_certificate,
     tonic_identity, validate_worker_csr,
@@ -68,6 +71,14 @@ pub enum MasterCommand {
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
+    /// Show detailed capabilities for a paired worker.
+    Show {
+        node_id: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
 }
 
 pub async fn run(command: MasterCommand) -> Result<()> {
@@ -96,6 +107,11 @@ pub async fn run(command: MasterCommand) -> Result<()> {
             reject(&resolve_data_dir(data_dir)?, &node_id)
         }
         MasterCommand::Nodes { data_dir } => list_nodes(&resolve_data_dir(data_dir)?),
+        MasterCommand::Show {
+            node_id,
+            json,
+            data_dir,
+        } => show_node(&resolve_data_dir(data_dir)?, &node_id, json),
     }
 }
 
@@ -127,6 +143,150 @@ pub fn list_nodes(data_dir: &Path) -> Result<()> {
         println!("{node_id:<36}  {node_name:<20}  {status}");
     }
     Ok(())
+}
+
+pub fn show_node(data_dir: &Path, node_id: &str, json: bool) -> Result<()> {
+    let connection = open_database(data_dir)?;
+    let node = connection
+        .query_row(
+            "SELECT node_name, last_seen_ms, capabilities_json, capabilities_updated_ms FROM nodes WHERE node_id = ?1",
+            [node_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .with_context(|| format!("unknown node {node_id}"))?;
+    let capabilities_json = node
+        .2
+        .context("this node has not sent hardware capabilities yet")?;
+    let capabilities: HardwareSnapshot =
+        serde_json::from_str(&capabilities_json).context("stored node capabilities are invalid")?;
+    let detail = NodeDetail {
+        node_id,
+        node_name: node.0,
+        online: now_unix_ms()?.saturating_sub(node.1) <= OFFLINE_AFTER_MS,
+        capabilities_updated_unix_ms: node.3.unwrap_or_default(),
+        capabilities,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&detail)?);
+    } else {
+        print_node_detail(&detail);
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct NodeDetail<'a> {
+    node_id: &'a str,
+    node_name: String,
+    online: bool,
+    capabilities_updated_unix_ms: i64,
+    capabilities: HardwareSnapshot,
+}
+
+fn print_node_detail(detail: &NodeDetail<'_>) {
+    let cpu = &detail.capabilities.cpu;
+    let memory = &detail.capabilities.memory;
+    println!("Node: {} ({})", detail.node_name, detail.node_id);
+    println!(
+        "Status: {}",
+        if detail.online { "online" } else { "offline" }
+    );
+    println!(
+        "Capabilities updated: {} ms (Unix)",
+        detail.capabilities_updated_unix_ms
+    );
+    println!("CPU: {} {} ({})", cpu.vendor, cpu.model, cpu.architecture);
+    println!(
+        "Cores: {} physical / {} logical",
+        cpu.physical_cores
+            .map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+        cpu.logical_threads
+    );
+    print_optional(
+        "CPU maximum frequency",
+        cpu.max_frequency_mhz.map(|value| format!("{value} MHz")),
+    );
+    print_optional(
+        "CPU utilization",
+        cpu.utilization_percent.map(|value| format!("{value:.1}%")),
+    );
+    print_optional(
+        "CPU temperature",
+        cpu.temperature_celsius.map(|value| format!("{value:.1} C")),
+    );
+    println!(
+        "Load average: {} / {} / {}",
+        format_optional(cpu.load_average_1),
+        format_optional(cpu.load_average_5),
+        format_optional(cpu.load_average_15)
+    );
+    println!("Memory total: {}", format_bytes(memory.total_bytes));
+    println!("Memory used: {}", format_bytes(memory.used_bytes));
+    println!("Memory available: {}", format_bytes(memory.available_bytes));
+    println!("Memory free: {}", format_bytes(memory.free_bytes));
+    print_optional(
+        "Primary local IP",
+        detail.capabilities.primary_local_ip.clone(),
+    );
+    print_optional(
+        "Master round-trip latency",
+        detail
+            .capabilities
+            .master_latency_ms
+            .map(|value| format!("{value:.2} ms")),
+    );
+    println!("Network interfaces:");
+    for interface in &detail.capabilities.network_interfaces {
+        println!(
+            "  {} ({:?}, {})",
+            interface.name,
+            interface.connection_type,
+            if interface.is_up { "up" } else { "down" }
+        );
+        println!(
+            "    addresses: {}",
+            if interface.addresses.is_empty() {
+                "none".to_owned()
+            } else {
+                interface.addresses.join(", ")
+            }
+        );
+        print_optional(
+            "    link speed",
+            interface.speed_mbps.map(|value| format!("{value} Mbps")),
+        );
+    }
+}
+
+fn print_optional(label: &str, value: Option<String>) {
+    println!(
+        "{label}: {}",
+        value.unwrap_or_else(|| "unavailable".to_owned())
+    );
+}
+
+fn format_optional(value: Option<f64>) -> String {
+    value.map_or_else(|| "unavailable".to_owned(), |value| format!("{value:.2}"))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.2} {}", UNITS[unit])
 }
 
 fn list_pending(data_dir: &Path) -> Result<()> {
@@ -374,7 +534,7 @@ impl NodeService for NodeApi {
                 "node_id does not match the client certificate",
             ));
         }
-        if register.node_name.trim().is_empty() || register.protocol_version != "1" {
+        if register.node_name.trim().is_empty() || register.protocol_version != "2" {
             return Err(Status::invalid_argument(
                 "invalid node name or unsupported protocol version",
             ));
@@ -448,6 +608,187 @@ impl NodeService for NodeApi {
             last_seen,
         )))
     }
+
+    async fn update_resources(
+        &self,
+        request: Request<fusion_proto::v1::ResourceUpdate>,
+    ) -> Result<Response<NodeStatus>, Status> {
+        let cert_node_id = peer_node_id(&request)?;
+        let capabilities = request
+            .into_inner()
+            .capabilities
+            .ok_or_else(|| Status::invalid_argument("resource update is missing capabilities"))?;
+        if capabilities.node_id != cert_node_id {
+            return Err(Status::permission_denied(
+                "node_id does not match the client certificate",
+            ));
+        }
+        validate_capabilities(&capabilities)?;
+        let connection = open_database(&self.data_dir)
+            .map_err(|error| Status::internal(format!("opening node database: {error}")))?;
+        let node_name = connection
+            .query_row(
+                "SELECT node_name FROM nodes WHERE node_id = ?1",
+                [&capabilities.node_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| Status::internal(format!("checking registered worker: {error}")))?
+            .ok_or_else(|| Status::permission_denied("worker is not registered"))?;
+
+        let received_at = now_unix_ms()
+            .map_err(|error| Status::internal(format!("reading system clock: {error}")))?;
+        let node_id = capabilities.node_id.clone();
+        let snapshot = snapshot_from_proto(capabilities)
+            .map_err(|error| Status::invalid_argument(format!("invalid capabilities: {error}")))?;
+        let serialized = serde_json::to_string(&snapshot)
+            .map_err(|error| Status::internal(format!("serializing node capabilities: {error}")))?;
+        connection
+            .execute(
+                "UPDATE nodes SET capabilities_json = ?2, capabilities_updated_ms = ?3, last_seen_ms = ?3 WHERE node_id = ?1",
+                params![node_id, serialized, received_at],
+            )
+            .map_err(|error| Status::internal(format!("storing node capabilities: {error}")))?;
+
+        Ok(Response::new(node_status(node_id, node_name, received_at)))
+    }
+}
+
+fn validate_capabilities(capabilities: &fusion_proto::v1::NodeCapabilities) -> Result<(), Status> {
+    let Some(cpu) = capabilities.cpu.as_ref() else {
+        return Err(Status::invalid_argument("CPU capabilities are required"));
+    };
+    let Some(memory) = capabilities.memory.as_ref() else {
+        return Err(Status::invalid_argument("memory capabilities are required"));
+    };
+    if capabilities.observed_unix_ms <= 0
+        || cpu.vendor.len() > 256
+        || cpu.model.len() > 512
+        || cpu.architecture.len() > 64
+        || cpu.architecture.is_empty()
+        || cpu.logical_threads == 0
+        || cpu.logical_threads > 4096
+        || cpu
+            .physical_cores
+            .is_some_and(|cores| cores == 0 || cores > 4096)
+        || memory.total_bytes == 0
+        || memory.used_bytes > memory.total_bytes
+        || memory.available_bytes > memory.total_bytes
+        || memory.free_bytes > memory.total_bytes
+        || memory.used_bytes != memory.total_bytes.saturating_sub(memory.available_bytes)
+        || memory.free_bytes > memory.available_bytes
+        || capabilities.network_interfaces.len() > 64
+        || capabilities
+            .primary_local_ip
+            .as_ref()
+            .is_some_and(|address| address.len() > 128)
+    {
+        return Err(Status::invalid_argument(
+            "invalid hardware capability fields",
+        ));
+    }
+    if let Some(value) = cpu.utilization_percent {
+        if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+            return Err(Status::invalid_argument(
+                "CPU utilization must be between 0 and 100",
+            ));
+        }
+    }
+    if let Some(value) = cpu.temperature_celsius {
+        if !value.is_finite() || !(-20.0..=150.0).contains(&value) {
+            return Err(Status::invalid_argument(
+                "CPU temperature is outside supported range",
+            ));
+        }
+    }
+    for load in [cpu.load_average_1, cpu.load_average_5, cpu.load_average_15]
+        .into_iter()
+        .flatten()
+    {
+        if !load.is_finite() || load < 0.0 {
+            return Err(Status::invalid_argument(
+                "CPU load averages must be non-negative",
+            ));
+        }
+    }
+    if let Some(value) = capabilities.master_latency_ms {
+        if !value.is_finite() || value < 0.0 {
+            return Err(Status::invalid_argument(
+                "master latency must be non-negative",
+            ));
+        }
+    }
+    for interface in &capabilities.network_interfaces {
+        if interface.name.is_empty()
+            || interface.name.len() > 64
+            || interface.addresses.len() > 32
+            || interface
+                .addresses
+                .iter()
+                .any(|address| address.len() > 128)
+        {
+            return Err(Status::invalid_argument("invalid network interface fields"));
+        }
+        if fusion_proto::v1::ConnectionType::try_from(interface.connection_type).is_err() {
+            return Err(Status::invalid_argument(
+                "unknown network interface connection type",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn snapshot_from_proto(
+    capabilities: fusion_proto::v1::NodeCapabilities,
+) -> anyhow::Result<HardwareSnapshot> {
+    let cpu = capabilities.cpu.context("CPU capabilities are required")?;
+    let memory = capabilities
+        .memory
+        .context("memory capabilities are required")?;
+    Ok(HardwareSnapshot {
+        observed_unix_ms: capabilities.observed_unix_ms,
+        cpu: CpuCapabilities {
+            vendor: cpu.vendor,
+            model: cpu.model,
+            architecture: cpu.architecture,
+            physical_cores: cpu.physical_cores,
+            logical_threads: cpu.logical_threads,
+            max_frequency_mhz: cpu.max_frequency_mhz,
+            utilization_percent: cpu.utilization_percent,
+            temperature_celsius: cpu.temperature_celsius,
+            load_average_1: cpu.load_average_1,
+            load_average_5: cpu.load_average_5,
+            load_average_15: cpu.load_average_15,
+        },
+        memory: MemoryCapabilities {
+            total_bytes: memory.total_bytes,
+            used_bytes: memory.used_bytes,
+            available_bytes: memory.available_bytes,
+            free_bytes: memory.free_bytes,
+        },
+        network_interfaces: capabilities
+            .network_interfaces
+            .into_iter()
+            .map(|interface| NetworkInterface {
+                name: interface.name,
+                addresses: interface.addresses,
+                connection_type: match fusion_proto::v1::ConnectionType::try_from(
+                    interface.connection_type,
+                )
+                .unwrap_or(fusion_proto::v1::ConnectionType::Unspecified)
+                {
+                    fusion_proto::v1::ConnectionType::Ethernet => ConnectionType::Ethernet,
+                    fusion_proto::v1::ConnectionType::Wifi => ConnectionType::Wifi,
+                    fusion_proto::v1::ConnectionType::Loopback => ConnectionType::Loopback,
+                    _ => ConnectionType::Other,
+                },
+                speed_mbps: interface.speed_mbps,
+                is_up: interface.is_up,
+            })
+            .collect(),
+        primary_local_ip: capabilities.primary_local_ip,
+        master_latency_ms: capabilities.master_latency_ms,
+    })
 }
 
 fn peer_node_id<T>(request: &Request<T>) -> Result<String, Status> {
@@ -493,9 +834,12 @@ fn initialize_database(data_dir: &Path) -> Result<()> {
              node_id TEXT PRIMARY KEY NOT NULL,
              node_name TEXT NOT NULL,
              protocol_version TEXT NOT NULL,
-             last_seen_ms INTEGER NOT NULL
+             last_seen_ms INTEGER NOT NULL,
+             capabilities_json TEXT,
+             capabilities_updated_ms INTEGER
          );",
     )?;
+    ensure_node_capability_columns(&connection)?;
     Ok(())
 }
 
@@ -503,7 +847,46 @@ fn open_database(data_dir: &Path) -> Result<Connection> {
     let connection = Connection::open(data_dir.join("fusion.sqlite3"))
         .with_context(|| format!("opening database in {}", data_dir.display()))?;
     connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS pairing_requests (
+             node_id TEXT PRIMARY KEY NOT NULL,
+             node_name TEXT NOT NULL,
+             csr_pem TEXT NOT NULL,
+             state INTEGER NOT NULL CHECK (state IN (1, 2, 3)),
+             certificate_pem TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS nodes (
+             node_id TEXT PRIMARY KEY NOT NULL,
+             node_name TEXT NOT NULL,
+             protocol_version TEXT NOT NULL,
+             last_seen_ms INTEGER NOT NULL,
+             capabilities_json TEXT,
+             capabilities_updated_ms INTEGER
+         );",
+    )?;
+    ensure_node_capability_columns(&connection)?;
     Ok(connection)
+}
+
+fn ensure_node_capability_columns(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(nodes)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    if !columns.iter().any(|column| column == "capabilities_json") {
+        connection.execute("ALTER TABLE nodes ADD COLUMN capabilities_json TEXT", [])?;
+    }
+    if !columns
+        .iter()
+        .any(|column| column == "capabilities_updated_ms")
+    {
+        connection.execute(
+            "ALTER TABLE nodes ADD COLUMN capabilities_updated_ms INTEGER",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn now_unix_ms() -> Result<i64> {
@@ -514,4 +897,42 @@ fn now_unix_ms() -> Result<i64> {
         .as_millis()
         .try_into()
         .context("system clock timestamp exceeds supported range")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_phase_one_database_gains_capability_columns() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let database_path = directory.path().join("fusion.sqlite3");
+        let connection = Connection::open(&database_path)?;
+        connection.execute_batch(
+            "CREATE TABLE nodes (
+                node_id TEXT PRIMARY KEY NOT NULL,
+                node_name TEXT NOT NULL,
+                protocol_version TEXT NOT NULL,
+                last_seen_ms INTEGER NOT NULL
+            );
+            INSERT INTO nodes VALUES ('worker-1', 'legacy-worker', '2', 1234);",
+        )?;
+        drop(connection);
+
+        let connection = open_database(directory.path())?;
+        let (name, capabilities): (String, Option<String>) = connection.query_row(
+            "SELECT node_name, capabilities_json FROM nodes WHERE node_id = 'worker-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(name, "legacy-worker");
+        assert_eq!(capabilities, None);
+        Ok(())
+    }
+
+    #[test]
+    fn resource_updates_require_cpu_and_memory_capabilities() {
+        let empty = fusion_proto::v1::NodeCapabilities::default();
+        assert!(validate_capabilities(&empty).is_err());
+    }
 }

@@ -6,12 +6,16 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
+use fusion_discovery::{ConnectionType, HardwareProbe, HardwareSnapshot};
 use fusion_network::{
     create_worker_csr, default_data_dir, tonic_ca_certificate, tonic_identity, verify_fingerprint,
     write_private_file,
 };
 use fusion_proto::v1::{
-    HeartbeatRequest, NodeRegister, PairingRequest, PairingState, PairingStatusRequest,
+    ConnectionType as ProtoConnectionType, CpuCapabilities as ProtoCpuCapabilities,
+    HeartbeatRequest, MemoryCapabilities as ProtoMemoryCapabilities,
+    NetworkInterface as ProtoNetworkInterface, NodeCapabilities as ProtoNodeCapabilities,
+    NodeRegister, PairingRequest, PairingState, PairingStatusRequest, ResourceUpdate,
     node_service_client::NodeServiceClient, pairing_service_client::PairingServiceClient,
 };
 use tokio::{
@@ -164,13 +168,31 @@ async fn join(options: JoinOptions) -> Result<()> {
         .register(NodeRegister {
             node_id: node_id.clone(),
             node_name: options.node_name,
-            protocol_version: "1".to_owned(),
+            protocol_version: "2".to_owned(),
         })
         .await
         .context("registering Worker with the Master")?;
 
     println!("Worker registered and connected. Sending heartbeat every 5 seconds.");
+    let master_addr = SocketAddr::new(options.master_ip, options.node_port);
+    let mut probe = HardwareProbe::new();
+    let initial_snapshot = probe
+        .collect(Some(master_addr), None)
+        .context("collecting initial hardware capabilities")?;
+    node_client
+        .update_resources(ResourceUpdate {
+            capabilities: Some(snapshot_to_proto(&node_id, initial_snapshot)),
+        })
+        .await
+        .context("sending initial hardware capabilities")?;
+
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    heartbeat.tick().await;
+    let mut telemetry = tokio::time::interval(Duration::from_secs(30));
+    telemetry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    telemetry.tick().await;
+    let mut master_latency_ms = None;
     loop {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
@@ -179,16 +201,73 @@ async fn join(options: JoinOptions) -> Result<()> {
                 break;
             }
             _ = heartbeat.tick() => {
+                let started = Instant::now();
                 node_client
                     .heartbeat(HeartbeatRequest {
                         node_id: node_id.clone(),
                     })
                     .await
                     .context("sending heartbeat to the Master")?;
+                master_latency_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            _ = telemetry.tick() => {
+                let snapshot = probe
+                    .collect(Some(master_addr), master_latency_ms)
+                    .context("collecting updated hardware capabilities")?;
+                node_client
+                    .update_resources(ResourceUpdate {
+                        capabilities: Some(snapshot_to_proto(&node_id, snapshot)),
+                    })
+                    .await
+                    .context("updating hardware capabilities on the Master")?;
             }
         }
     }
     Ok(())
+}
+
+fn snapshot_to_proto(node_id: &str, snapshot: HardwareSnapshot) -> ProtoNodeCapabilities {
+    ProtoNodeCapabilities {
+        node_id: node_id.to_owned(),
+        observed_unix_ms: snapshot.observed_unix_ms,
+        cpu: Some(ProtoCpuCapabilities {
+            vendor: snapshot.cpu.vendor,
+            model: snapshot.cpu.model,
+            architecture: snapshot.cpu.architecture,
+            physical_cores: snapshot.cpu.physical_cores,
+            logical_threads: snapshot.cpu.logical_threads,
+            max_frequency_mhz: snapshot.cpu.max_frequency_mhz,
+            utilization_percent: snapshot.cpu.utilization_percent,
+            temperature_celsius: snapshot.cpu.temperature_celsius,
+            load_average_1: snapshot.cpu.load_average_1,
+            load_average_5: snapshot.cpu.load_average_5,
+            load_average_15: snapshot.cpu.load_average_15,
+        }),
+        memory: Some(ProtoMemoryCapabilities {
+            total_bytes: snapshot.memory.total_bytes,
+            used_bytes: snapshot.memory.used_bytes,
+            available_bytes: snapshot.memory.available_bytes,
+            free_bytes: snapshot.memory.free_bytes,
+        }),
+        network_interfaces: snapshot
+            .network_interfaces
+            .into_iter()
+            .map(|interface| ProtoNetworkInterface {
+                name: interface.name,
+                addresses: interface.addresses,
+                connection_type: match interface.connection_type {
+                    ConnectionType::Ethernet => ProtoConnectionType::Ethernet as i32,
+                    ConnectionType::Wifi => ProtoConnectionType::Wifi as i32,
+                    ConnectionType::Loopback => ProtoConnectionType::Loopback as i32,
+                    ConnectionType::Other => ProtoConnectionType::Other as i32,
+                },
+                speed_mbps: interface.speed_mbps,
+                is_up: interface.is_up,
+            })
+            .collect(),
+        primary_local_ip: snapshot.primary_local_ip,
+        master_latency_ms: snapshot.master_latency_ms,
+    }
 }
 
 async fn tls_channel(

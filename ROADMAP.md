@@ -66,19 +66,19 @@ Antes de escribir funcionalidad.
 **Objetivo:** que cada Worker describa su hardware con una estructura común.
 
 **Tareas**
-- [ ] Definir el mensaje `NODE_CAPABILITIES` y las estructuras comunes (CPU, RAM, red).
-- [ ] CPU: fabricante, modelo, arquitectura, núcleos físicos, hilos lógicos, frecuencia, utilización, carga (`/proc/cpuinfo`, `/proc/stat`, `/sys`).
-- [ ] RAM: total, usada, disponible, libre (`/proc/meminfo`).
-- [ ] Red: interfaces, IP local, tipo de conexión, velocidad de enlace, latencia hacia el Master.
-- [ ] Temperaturas cuando estén disponibles (`/sys/class/thermal`, `hwmon`), tratándolas como opcionales.
-- [ ] Envío periódico de `RESOURCE_UPDATE` desde el Worker.
-- [ ] Guardar capacidades y estado en la base de datos del Master.
-- [ ] Comando `fusion nodes show <nodo>` con la información en formato legible y JSON.
-- [ ] Pruebas con datos simulados para no depender de un hardware concreto.
+- [x] Definir el mensaje `NODE_CAPABILITIES` y las estructuras comunes (CPU, RAM, red).
+- [x] CPU: fabricante, modelo, arquitectura, núcleos físicos, hilos lógicos, frecuencia, utilización, carga (`/proc/cpuinfo`, `/proc/stat`, `/sys`).
+- [x] RAM: total, usada, disponible, libre (`/proc/meminfo`).
+- [x] Red: interfaces, IP local, tipo de conexión, velocidad de enlace, latencia hacia el Master.
+- [x] Temperaturas cuando estén disponibles (`/sys/class/thermal`, `hwmon`), tratándolas como opcionales.
+- [x] Envío periódico de `RESOURCE_UPDATE` desde el Worker.
+- [x] Guardar capacidades y estado en la base de datos del Master.
+- [x] Comando `fusion nodes show <nodo>` con la información en formato legible y JSON.
+- [x] Pruebas con datos simulados para no depender de un hardware concreto.
 
 **Entregable:** vista de capacidades y uso en tiempo casi real de todos los nodos.
 
-**Criterio de finalización:** la CLI muestra correctamente la información en al menos dos equipos distintos (por ejemplo, Intel y AMD).
+**Criterio de finalización:** [ ] pendiente de validar la CLI en al menos dos equipos distintos (por ejemplo, Intel y AMD).
 
 **Riesgos y decisiones**
 - Muchos valores no están disponibles en todo el hardware: el diseño debe tratar los datos como opcionales.

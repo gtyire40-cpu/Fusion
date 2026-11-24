@@ -10,6 +10,7 @@ service PairingService {
 service NodeService {
   rpc Register(NodeRegister) returns (NodeStatus);
   rpc Heartbeat(HeartbeatRequest) returns (NodeStatus);
+  rpc UpdateResources(ResourceUpdate) returns (NodeStatus);
 }
 
 message PairingRequest {
@@ -54,4 +55,55 @@ message NodeStatus {
   string node_name = 2;
   int64 last_seen_unix_ms = 3;
   bool online = 4;
+}
+
+message NodeCapabilities {
+  string node_id = 1;
+  int64 observed_unix_ms = 2;
+  CpuCapabilities cpu = 3;
+  MemoryCapabilities memory = 4;
+  repeated NetworkInterface network_interfaces = 5;
+  optional string primary_local_ip = 6;
+  optional double master_latency_ms = 7;
+}
+
+message ResourceUpdate {
+  NodeCapabilities capabilities = 1;
+}
+
+message CpuCapabilities {
+  string vendor = 1;
+  string model = 2;
+  string architecture = 3;
+  optional uint32 physical_cores = 4;
+  uint32 logical_threads = 5;
+  optional uint64 max_frequency_mhz = 6;
+  optional double utilization_percent = 7;
+  optional double temperature_celsius = 8;
+  optional double load_average_1 = 9;
+  optional double load_average_5 = 10;
+  optional double load_average_15 = 11;
+}
+
+message MemoryCapabilities {
+  uint64 total_bytes = 1;
+  uint64 used_bytes = 2;
+  uint64 available_bytes = 3;
+  uint64 free_bytes = 4;
+}
+
+message NetworkInterface {
+  string name = 1;
+  repeated string addresses = 2;
+  ConnectionType connection_type = 3;
+  optional uint64 speed_mbps = 4;
+  bool is_up = 5;
+}
+
+enum ConnectionType {
+  CONNECTION_TYPE_UNSPECIFIED = 0;
+  CONNECTION_TYPE_ETHERNET = 1;
+  CONNECTION_TYPE_WIFI = 2;
+  CONNECTION_TYPE_LOOPBACK = 3;
+  CONNECTION_TYPE_OTHER = 4;
 }

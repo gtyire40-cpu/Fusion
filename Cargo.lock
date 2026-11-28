@@ -521,6 +521,8 @@ dependencies = [
  "fusion-network",
  "fusion-proto",
  "rcgen",
+ "serde",
+ "serde_json",
  "sha2",
  "tokio",
  "tonic",

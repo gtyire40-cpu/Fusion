@@ -14,6 +14,8 @@ fusion-network = { path = "../fusion-network" }
 fusion-proto = { path = "../fusion-proto" }
 fusion-discovery = { path = "../fusion-discovery" }
 rcgen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tonic.workspace = true

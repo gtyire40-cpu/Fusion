@@ -199,6 +199,91 @@ fn worker_requires_approval_then_registers_with_mtls() -> Result<(), Box<dyn std
         .output()?;
     assert!(nodes.status.success());
     assert!(String::from_utf8(nodes.stdout)?.contains("offline"));
+
+    let mut rejoined_worker = ChildGuard(
+        Command::new(binary)
+            .args([
+                "worker",
+                "join",
+                "127.0.0.1",
+                "--fingerprint",
+                &fingerprint,
+                "--pairing-port",
+                &pairing_port.to_string(),
+                "--node-port",
+                &node_port.to_string(),
+                "--ca-port",
+                &ca_port.to_string(),
+                "--name",
+                "integration-worker",
+                "--approval-timeout-secs",
+                "30",
+                "--data-dir",
+                worker_dir.path().to_str().expect("UTF-8 temp path"),
+            ])
+            .stdout(Stdio::piped())
+            .spawn()?,
+    );
+    let rejoined_stdout = rejoined_worker
+        .0
+        .stdout
+        .take()
+        .expect("capture rejoined Worker output");
+    let mut rejoined_lines = BufReader::new(rejoined_stdout);
+    let reused_line = read_until(&mut rejoined_lines, "Reusing Worker ID:");
+    assert!(reused_line.contains(&node_id));
+    read_until(&mut rejoined_lines, "Worker registered and connected.");
+    let nodes = Command::new(binary)
+        .args([
+            "nodes",
+            "list",
+            "--data-dir",
+            data_dir.path().to_str().expect("UTF-8 temp path"),
+        ])
+        .output()?;
+    assert!(nodes.status.success());
+    let nodes = String::from_utf8(nodes.stdout)?;
+    assert!(nodes.contains(&node_id));
+    assert!(!nodes.contains("offline"));
+    rejoined_worker.0.kill()?;
+    rejoined_worker.0.wait()?;
+
+    std::fs::remove_file(worker_dir.path().join("worker-identity.json"))?;
+    let mut legacy_worker = ChildGuard(
+        Command::new(binary)
+            .args([
+                "worker",
+                "join",
+                "127.0.0.1",
+                "--fingerprint",
+                &fingerprint,
+                "--pairing-port",
+                &pairing_port.to_string(),
+                "--node-port",
+                &node_port.to_string(),
+                "--ca-port",
+                &ca_port.to_string(),
+                "--name",
+                "integration-worker",
+                "--approval-timeout-secs",
+                "30",
+                "--data-dir",
+                worker_dir.path().to_str().expect("UTF-8 temp path"),
+            ])
+            .stdout(Stdio::piped())
+            .spawn()?,
+    );
+    let legacy_stdout = legacy_worker
+        .0
+        .stdout
+        .take()
+        .expect("capture legacy Worker output");
+    let mut legacy_lines = BufReader::new(legacy_stdout);
+    let recovered_line = read_until(&mut legacy_lines, "Recovered legacy Worker ID:");
+    assert!(recovered_line.contains(&node_id));
+    read_until(&mut legacy_lines, "Worker registered and connected.");
+    legacy_worker.0.kill()?;
+    legacy_worker.0.wait()?;
     master.0.kill()?;
     master.0.wait()?;
     Ok(())

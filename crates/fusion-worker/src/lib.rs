@@ -1,6 +1,7 @@
 use std::{
+    fs,
     net::{IpAddr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -29,10 +30,11 @@ use uuid::Uuid;
 const PAIRING_PORT: u16 = 50051;
 const NODE_PORT: u16 = 50052;
 const CA_PORT: u16 = 50053;
+const WORKER_IDENTITY_FILE: &str = "worker-identity.json";
 
 #[derive(Debug, Subcommand)]
 pub enum WorkerCommand {
-    /// Request approval, register, and keep sending heartbeats.
+    /// Pair on first run, then reuse the saved identity and send heartbeats.
     Join {
         master_ip: IpAddr,
         #[arg(long)]
@@ -58,9 +60,16 @@ struct JoinOptions {
     pairing_port: u16,
     node_port: u16,
     ca_port: u16,
-    node_name: String,
+    node_name: Option<String>,
     approval_timeout_secs: u64,
     data_dir: PathBuf,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct WorkerIdentity {
+    node_id: String,
+    node_name: String,
+    ca_fingerprint: String,
 }
 
 pub async fn run(command: WorkerCommand) -> Result<()> {
@@ -75,7 +84,6 @@ pub async fn run(command: WorkerCommand) -> Result<()> {
             approval_timeout_secs,
             data_dir,
         } => {
-            let node_name = name.unwrap_or_else(default_node_name);
             let data_dir = match data_dir {
                 Some(path) => path,
                 None => default_data_dir()?,
@@ -86,7 +94,7 @@ pub async fn run(command: WorkerCommand) -> Result<()> {
                 pairing_port,
                 node_port,
                 ca_port,
-                node_name,
+                node_name: name,
                 approval_timeout_secs,
                 data_dir,
             })
@@ -96,64 +104,123 @@ pub async fn run(command: WorkerCommand) -> Result<()> {
 }
 
 async fn join(options: JoinOptions) -> Result<()> {
-    if options.node_name.trim().is_empty() || options.node_name.len() > 128 {
+    if options
+        .node_name
+        .as_ref()
+        .is_some_and(|name| name.trim().is_empty() || name.len() > 128)
+    {
         bail!("Worker name must contain 1 to 128 characters");
     }
-    let ca_pem = download_ca(options.master_ip, options.ca_port).await?;
+    let ca_pem = download_ca(options.master_ip, options.ca_port)
+        .await
+        .context("ensure `fusion master start` is running and reachable")?;
     verify_fingerprint(&ca_pem, &options.expected_fingerprint)?;
+    let current_ca_fingerprint = fusion_network::ca_fingerprint(&ca_pem)?;
 
-    let node_id = Uuid::new_v4().to_string();
-    let (csr_pem, private_key_pem) = create_worker_csr(&node_id, &options.node_name)?;
-    let pairing_channel = tls_channel(options.master_ip, options.pairing_port, &ca_pem, None)
-        .await
-        .context("connecting to the Master pairing service")?;
-    let mut pairing_client = PairingServiceClient::new(pairing_channel);
-    pairing_client
-        .request_pairing(PairingRequest {
-            request_id: node_id.clone(),
-            node_name: options.node_name.clone(),
-            certificate_signing_request_pem: csr_pem,
-        })
-        .await
-        .context("requesting Worker approval")?;
-
-    println!("Pairing request sent. Worker ID: {node_id}");
-    println!("Approve it on the Master with: fusion master approve {node_id}");
-    let deadline = Instant::now() + Duration::from_secs(options.approval_timeout_secs);
-    let certificate_pem = loop {
-        if Instant::now() >= deadline {
-            bail!("timed out waiting for Master approval");
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let response = pairing_client
-            .get_pairing_status(PairingStatusRequest {
-                request_id: node_id.clone(),
-            })
-            .await
-            .context("checking pairing approval")?
-            .into_inner();
-        match response.state {
-            value if value == PairingState::Pending as i32 => {}
-            value if value == PairingState::Approved as i32 => {
-                if response.certificate_pem.is_empty() {
-                    bail!("Master approved the request but returned no certificate");
-                }
-                break response.certificate_pem;
-            }
-            value if value == PairingState::Rejected as i32 => {
-                bail!("Master rejected the pairing request");
-            }
-            _ => bail!("Master returned an unknown pairing state"),
+    let (identity, recovered_legacy_identity) = match load_worker_identity(&options.data_dir)? {
+        Some(identity) => (Some(identity), false),
+        None => {
+            let identity = recover_legacy_worker_identity(
+                &options.data_dir,
+                &current_ca_fingerprint,
+                options.node_name.as_deref(),
+            )?;
+            let recovered = identity.is_some();
+            (identity, recovered)
         }
     };
-    let worker_dir = options.data_dir.join(format!("worker-{node_id}"));
-    std::fs::create_dir_all(&worker_dir)?;
-    write_private_file(
-        &worker_dir.join("worker-key.pem"),
-        private_key_pem.as_bytes(),
-    )?;
-    std::fs::write(worker_dir.join("worker-cert.pem"), &certificate_pem)?;
-    std::fs::write(worker_dir.join("ca.pem"), &ca_pem)?;
+    let (node_id, node_name, certificate_pem, private_key_pem) = if let Some(identity) = identity {
+        if identity.ca_fingerprint != current_ca_fingerprint {
+            bail!("saved Worker identity belongs to a different Master CA");
+        }
+        if options
+            .node_name
+            .as_ref()
+            .is_some_and(|name| name != &identity.node_name)
+        {
+            bail!(
+                "saved Worker identity is named {:?}; use that name or the original data directory",
+                identity.node_name
+            );
+        }
+        let worker_dir = options
+            .data_dir
+            .join(format!("worker-{}", identity.node_id));
+        let certificate_pem = fs::read_to_string(worker_dir.join("worker-cert.pem"))
+            .context("reading saved Worker certificate")?;
+        let private_key_pem = fs::read_to_string(worker_dir.join("worker-key.pem"))
+            .context("reading saved Worker private key")?;
+        println!("Reusing Worker ID: {}", identity.node_id);
+        (
+            identity.node_id,
+            identity.node_name,
+            certificate_pem,
+            private_key_pem,
+        )
+    } else {
+        let node_name = options.node_name.unwrap_or_else(default_node_name);
+        let node_id = Uuid::new_v4().to_string();
+        let (csr_pem, private_key_pem) = create_worker_csr(&node_id, &node_name)?;
+        let pairing_channel = tls_channel(options.master_ip, options.pairing_port, &ca_pem, None)
+            .await
+            .context("connecting to the Master pairing service")?;
+        let mut pairing_client = PairingServiceClient::new(pairing_channel);
+        pairing_client
+            .request_pairing(PairingRequest {
+                request_id: node_id.clone(),
+                node_name: node_name.clone(),
+                certificate_signing_request_pem: csr_pem,
+            })
+            .await
+            .context("requesting Worker approval")?;
+
+        println!("Pairing request sent. Worker ID: {node_id}");
+        println!("Approve it on the Master with: fusion master approve {node_id}");
+        let deadline = Instant::now() + Duration::from_secs(options.approval_timeout_secs);
+        let certificate_pem = loop {
+            if Instant::now() >= deadline {
+                bail!("timed out waiting for Master approval");
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let response = pairing_client
+                .get_pairing_status(PairingStatusRequest {
+                    request_id: node_id.clone(),
+                })
+                .await
+                .context("checking pairing approval")?
+                .into_inner();
+            match response.state {
+                value if value == PairingState::Pending as i32 => {}
+                value if value == PairingState::Approved as i32 => {
+                    if response.certificate_pem.is_empty() {
+                        bail!("Master approved the request but returned no certificate");
+                    }
+                    break response.certificate_pem;
+                }
+                value if value == PairingState::Rejected as i32 => {
+                    bail!("Master rejected the pairing request");
+                }
+                _ => bail!("Master returned an unknown pairing state"),
+            }
+        };
+        let worker_dir = options.data_dir.join(format!("worker-{node_id}"));
+        fs::create_dir_all(&worker_dir)?;
+        write_private_file(
+            &worker_dir.join("worker-key.pem"),
+            private_key_pem.as_bytes(),
+        )?;
+        fs::write(worker_dir.join("worker-cert.pem"), &certificate_pem)?;
+        fs::write(worker_dir.join("ca.pem"), &ca_pem)?;
+        save_worker_identity(
+            &options.data_dir,
+            &WorkerIdentity {
+                node_id: node_id.clone(),
+                node_name: node_name.clone(),
+                ca_fingerprint: current_ca_fingerprint.clone(),
+            },
+        )?;
+        (node_id, node_name, certificate_pem, private_key_pem)
+    };
 
     let node_channel = tls_channel(
         options.master_ip,
@@ -167,11 +234,21 @@ async fn join(options: JoinOptions) -> Result<()> {
     node_client
         .register(NodeRegister {
             node_id: node_id.clone(),
-            node_name: options.node_name,
+            node_name: node_name.clone(),
             protocol_version: "2".to_owned(),
         })
         .await
         .context("registering Worker with the Master")?;
+    if recovered_legacy_identity {
+        save_worker_identity(
+            &options.data_dir,
+            &WorkerIdentity {
+                node_id: node_id.clone(),
+                node_name,
+                ca_fingerprint: current_ca_fingerprint,
+            },
+        )?;
+    }
 
     println!("Worker registered and connected. Sending heartbeat every 5 seconds.");
     let master_addr = SocketAddr::new(options.master_ip, options.node_port);
@@ -224,6 +301,88 @@ async fn join(options: JoinOptions) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn load_worker_identity(data_dir: &Path) -> Result<Option<WorkerIdentity>> {
+    let path = data_dir.join(WORKER_IDENTITY_FILE);
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let identity: WorkerIdentity =
+        serde_json::from_str(&contents).context("parsing saved Worker identity")?;
+    Uuid::parse_str(&identity.node_id).context("saved Worker identity has an invalid node ID")?;
+    Ok(Some(identity))
+}
+
+fn recover_legacy_worker_identity(
+    data_dir: &Path,
+    current_ca_fingerprint: &str,
+    requested_node_name: Option<&str>,
+) -> Result<Option<WorkerIdentity>> {
+    let entries = match fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", data_dir.display())),
+    };
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let directory_name = entry.file_name();
+        let Some(node_id) = directory_name
+            .to_string_lossy()
+            .strip_prefix("worker-")
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if Uuid::parse_str(&node_id).is_err() {
+            continue;
+        }
+        let worker_dir = entry.path();
+        let ca_pem = match fs::read_to_string(worker_dir.join("ca.pem")) {
+            Ok(ca_pem) => ca_pem,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("reading legacy Worker CA certificate"),
+        };
+        if fusion_network::ca_fingerprint(&ca_pem)? != current_ca_fingerprint {
+            continue;
+        }
+        if !worker_dir.join("worker-cert.pem").is_file()
+            || !worker_dir.join("worker-key.pem").is_file()
+        {
+            continue;
+        }
+        candidates.push((entry.metadata()?.modified()?, node_id));
+    }
+
+    let Some((_, node_id)) = candidates
+        .into_iter()
+        .max_by(|left, right| left.0.cmp(&right.0))
+    else {
+        return Ok(None);
+    };
+    let identity = WorkerIdentity {
+        node_id: node_id.clone(),
+        node_name: requested_node_name
+            .map(str::to_owned)
+            .unwrap_or_else(default_node_name),
+        ca_fingerprint: current_ca_fingerprint.to_owned(),
+    };
+    println!("Recovered legacy Worker ID: {node_id}");
+    Ok(Some(identity))
+}
+
+fn save_worker_identity(data_dir: &Path, identity: &WorkerIdentity) -> Result<()> {
+    fs::write(
+        data_dir.join(WORKER_IDENTITY_FILE),
+        serde_json::to_vec_pretty(identity)?,
+    )
+    .context("saving Worker identity")
 }
 
 fn snapshot_to_proto(node_id: &str, snapshot: HardwareSnapshot) -> ProtoNodeCapabilities {

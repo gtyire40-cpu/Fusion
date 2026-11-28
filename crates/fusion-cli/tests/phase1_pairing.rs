@@ -265,6 +265,8 @@ fn worker_requires_approval_then_registers_with_mtls() -> Result<(), Box<dyn std
                 &ca_port.to_string(),
                 "--name",
                 "integration-worker",
+                "--recover-node-id",
+                &node_id,
                 "--approval-timeout-secs",
                 "30",
                 "--data-dir",

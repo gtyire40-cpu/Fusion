@@ -47,6 +47,9 @@ pub enum WorkerCommand {
         ca_port: u16,
         #[arg(long)]
         name: Option<String>,
+        /// Select a legacy Worker identity when multiple saved identities exist.
+        #[arg(long, value_name = "UUID")]
+        recover_node_id: Option<String>,
         #[arg(long, default_value_t = 300)]
         approval_timeout_secs: u64,
         #[arg(long)]
@@ -61,6 +64,7 @@ struct JoinOptions {
     node_port: u16,
     ca_port: u16,
     node_name: Option<String>,
+    recover_node_id: Option<String>,
     approval_timeout_secs: u64,
     data_dir: PathBuf,
 }
@@ -81,6 +85,7 @@ pub async fn run(command: WorkerCommand) -> Result<()> {
             node_port,
             ca_port,
             name,
+            recover_node_id,
             approval_timeout_secs,
             data_dir,
         } => {
@@ -95,6 +100,7 @@ pub async fn run(command: WorkerCommand) -> Result<()> {
                 node_port,
                 ca_port,
                 node_name: name,
+                recover_node_id,
                 approval_timeout_secs,
                 data_dir,
             })
@@ -111,6 +117,15 @@ async fn join(options: JoinOptions) -> Result<()> {
     {
         bail!("Worker name must contain 1 to 128 characters");
     }
+    let recover_node_id = options
+        .recover_node_id
+        .as_deref()
+        .map(|node_id| {
+            Uuid::parse_str(node_id)
+                .map(|node_id| node_id.to_string())
+                .context("--recover-node-id must be a UUID")
+        })
+        .transpose()?;
     let ca_pem = download_ca(options.master_ip, options.ca_port)
         .await
         .context("ensure `fusion master start` is running and reachable")?;
@@ -118,12 +133,24 @@ async fn join(options: JoinOptions) -> Result<()> {
     let current_ca_fingerprint = fusion_network::ca_fingerprint(&ca_pem)?;
 
     let (identity, recovered_legacy_identity) = match load_worker_identity(&options.data_dir)? {
-        Some(identity) => (Some(identity), false),
-        None => {
+        Some(identity)
+            if recover_node_id
+                .as_ref()
+                .is_none_or(|node_id| node_id.eq_ignore_ascii_case(&identity.node_id)) =>
+        {
+            (Some(identity), false)
+        }
+        stored_identity => {
+            let fallback_name = options.node_name.as_deref().or_else(|| {
+                stored_identity
+                    .as_ref()
+                    .map(|identity| identity.node_name.as_str())
+            });
             let identity = recover_legacy_worker_identity(
                 &options.data_dir,
                 &current_ca_fingerprint,
-                options.node_name.as_deref(),
+                fallback_name,
+                recover_node_id.as_deref(),
             )?;
             let recovered = identity.is_some();
             (identity, recovered)
@@ -320,6 +347,7 @@ fn recover_legacy_worker_identity(
     data_dir: &Path,
     current_ca_fingerprint: &str,
     requested_node_name: Option<&str>,
+    requested_node_id: Option<&str>,
 ) -> Result<Option<WorkerIdentity>> {
     let entries = match fs::read_dir(data_dir) {
         Ok(entries) => entries,
@@ -357,13 +385,10 @@ fn recover_legacy_worker_identity(
         {
             continue;
         }
-        candidates.push((entry.metadata()?.modified()?, node_id));
+        candidates.push(node_id);
     }
 
-    let Some((_, node_id)) = candidates
-        .into_iter()
-        .max_by(|left, right| left.0.cmp(&right.0))
-    else {
+    let Some(node_id) = select_recovery_candidate(candidates, requested_node_id)? else {
         return Ok(None);
     };
     let identity = WorkerIdentity {
@@ -375,6 +400,33 @@ fn recover_legacy_worker_identity(
     };
     println!("Recovered legacy Worker ID: {node_id}");
     Ok(Some(identity))
+}
+
+fn select_recovery_candidate(
+    mut candidates: Vec<String>,
+    requested_node_id: Option<&str>,
+) -> Result<Option<String>> {
+    candidates.sort();
+    candidates.dedup();
+    if let Some(requested_node_id) = requested_node_id {
+        return candidates
+            .into_iter()
+            .find(|node_id| node_id == requested_node_id)
+            .map(Some)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Worker identity {requested_node_id} was not found among saved identities for this Master"
+                )
+            });
+    }
+    match candidates.len() {
+        0 => Ok(None),
+        1 => Ok(candidates.pop()),
+        _ => bail!(
+            "multiple saved Worker identities found: {}. Choose one with --recover-node-id <UUID>",
+            candidates.join(", ")
+        ),
+    }
 }
 
 fn save_worker_identity(data_dir: &Path, identity: &WorkerIdentity) -> Result<()> {
@@ -484,4 +536,43 @@ async fn download_ca(master_ip: IpAddr, ca_port: u16) -> Result<String> {
 
 fn default_node_name() -> String {
     std::env::var("HOSTNAME").unwrap_or_else(|_| "fusion-worker".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_recovery_candidate;
+
+    #[test]
+    fn multiple_legacy_identities_require_an_explicit_choice() {
+        let error = select_recovery_candidate(
+            vec![
+                "e33becfe-ee3f-4b7d-918c-8a5a5139f92c".to_owned(),
+                "d01eb058-5df6-4e2d-aca7-3b535d85467d".to_owned(),
+            ],
+            None,
+        )
+        .expect_err("ambiguous identities must not be selected automatically")
+        .to_string();
+
+        assert!(error.contains("e33becfe-ee3f-4b7d-918c-8a5a5139f92c"));
+        assert!(error.contains("d01eb058-5df6-4e2d-aca7-3b535d85467d"));
+        assert!(error.contains("--recover-node-id"));
+    }
+
+    #[test]
+    fn explicit_legacy_identity_is_selected() {
+        let selected = select_recovery_candidate(
+            vec![
+                "e33becfe-ee3f-4b7d-918c-8a5a5139f92c".to_owned(),
+                "d01eb058-5df6-4e2d-aca7-3b535d85467d".to_owned(),
+            ],
+            Some("e33becfe-ee3f-4b7d-918c-8a5a5139f92c"),
+        )
+        .expect("identity selection should succeed");
+
+        assert_eq!(
+            selected.as_deref(),
+            Some("e33becfe-ee3f-4b7d-918c-8a5a5139f92c")
+        );
+    }
 }

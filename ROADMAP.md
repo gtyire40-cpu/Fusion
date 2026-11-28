@@ -49,7 +49,7 @@ Antes de escribir funcionalidad.
 - [x] Heartbeat periódico para saber si un nodo sigue vivo.
 - [x] CLI mínima: `fusion master start`, `fusion worker join <ip>`, `fusion nodes list`.
 - [x] Prueba de integración de emparejamiento, registro mTLS y heartbeat con dos procesos locales.
-- [ ] Validar la conexión y el corte de red con dos equipos reales.
+- [x] Validar la conexión y el corte de red con dos equipos reales.
 
 **Entregable:** dos programas que se emparejan y mantienen una conexión cifrada.
 
@@ -78,7 +78,7 @@ Antes de escribir funcionalidad.
 
 **Entregable:** vista de capacidades y uso en tiempo casi real de todos los nodos.
 
-**Criterio de finalización:** [ ] pendiente de validar la CLI en al menos dos equipos distintos (por ejemplo, Intel y AMD).
+**Criterio de finalización:** [ ] pendiente de validar la CLI en al menos dos equipos distintos (por ejemplo, Intel y AMD). Se están realizando pruebas con equipos actualemente.
 
 **Riesgos y decisiones**
 - Muchos valores no están disponibles en todo el hardware: el diseño debe tratar los datos como opcionales.
